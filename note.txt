@@ -1,0 +1,5 @@
+55.9% on validation dataset using bert just training on 80% of well labeled.
+80.6% after 100 epochs.
+78.2% after 1000 epochs.
+
+Bert Large 100 epochs - 72.1% 72.1% 72.1% 72.1% 72.1% 72.1% 72.1% 
