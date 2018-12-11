@@ -74,16 +74,6 @@ class DataProcessor(object):
         """Gets a collection of `InputExample`s for the train set."""
         raise NotImplementedError()
 
-
-class PretrainingDataset(Dataset):
-    def __init__(self, examples):
-        self.examples = examples
-
-     def __len__(self):
-        return len(self.examples)
-
-     def __getitem__(self, idx):
-
 def extract_sentences(article):
     return article.split('-eos-')
 
@@ -102,7 +92,9 @@ def extract_examples(datapoint):
         index_b, next_sentence_label = next_sentence(j, sentence_count)
         text_b = sentences[index_b].strip()
         guid = "%d-%d" % (i, j)
-        text_examples.append(InputExample(guid=guid, text_a=text_a, text_b=text_b, next_sentence_label=next_sentence_label))
+
+        if len(text_a) >= 10 and len(text_b) >= 10 and wordRE.search(text_a) and wordRE.search(text_b):
+            text_examples.append(InputExample(guid=guid, text_a=text_a, text_b=text_b, next_sentence_label=next_sentence_label))
 
     return text_examples
 
@@ -134,114 +126,107 @@ class SemevalProcessor(DataProcessor):
         
         return examples
 
-def construct_features(inputs):
-    example, max_seq_length, tokenizer = inputs
-    
-    tokens_a = tokenizer.tokenize(example.text_a)
-    tokens_b = None
-    if example.text_b:
-        tokens_b = tokenizer.tokenize(example.text_b)
+class PretrainingDataset(Dataset):
+    def __init__(self, examples, max_seq_length, tokenizer):
+        self.examples = examples
+        self.max_seq_length = max_seq_length
+        self.tokenizer = tokenizer
 
-    if tokens_b:
-        # Modifies `tokens_a` and `tokens_b` in place so that the total
-        # length is less than the specified length.
-        # Account for [CLS], [SEP], [SEP] with "- 3"
-        _truncate_seq_pair(tokens_a, tokens_b, max_seq_length - 3)
-    else:
-        # Account for [CLS] and [SEP] with "- 2"
-        if len(tokens_a) > max_seq_length - 2:
-            tokens_a = tokens_a[0:(max_seq_length - 2)]
+    def __len__(self):
+        return len(self.examples)
 
-    # The convention in BERT is:
-    # (a) For sequence pairs:
-    #  tokens:   [CLS] is this jack ##son ##ville ? [SEP] no it is not . [SEP]
-    #  type_ids: 0   0  0    0    0     0       0 0    1  1  1  1   1 1
-    # (b) For single sequences:
-    #  tokens:   [CLS] the dog is hairy . [SEP]
-    #  type_ids: 0   0   0   0  0     0 0
-    #
-    # Where "type_ids" are used to indicate whether this is the first
-    # sequence or the second sequence. The embedding vectors for `type=0` and
-    # `type=1` were learned during pre-training and are added to the wordpiece
-    # embedding vector (and position vector). This is not *strictly* necessary
-    # since the [SEP] token unambigiously separates the sequences, but it makes
-    # it easier for the model to learn the concept of sequences.
-    #
-    # For classification tasks, the first vector (corresponding to [CLS]) is
-    # used as as the "sentence vector". Note that this only makes sense because
-    # the entire model is fine-tuned.
-    tokens = []
-    segment_ids = []
-    tokens.append("[CLS]")
-    segment_ids.append(0)
-    for token in tokens_a:
-        tokens.append(token)
-        segment_ids.append(0)
-    tokens.append("[SEP]")
-    segment_ids.append(0)
+    def __getitem__(self, idx):
+        return self.construct_features(self.examples[idx])
 
-    if tokens_b:
-        for token in tokens_b:
-            tokens.append(token)
-            segment_ids.append(1)
-        tokens.append("[SEP]")
-        segment_ids.append(1)
+    def construct_features(self, example):
+        tokens_a = self.tokenizer.tokenize(example.text_a)
+        tokens_b = None
+        if example.text_b:
+            tokens_b = self.tokenizer.tokenize(example.text_b)
 
-    input_ids = tokenizer.convert_tokens_to_ids(tokens)
-
-    if len(input_ids) <= 15:
-        return None
-    
-    # The mask has 1 for real tokens and 0 for padding tokens. Only real
-    # tokens are attended to.
-    input_mask = [1] * len(input_ids)
-    masked_lm_labels = list(input_ids)
-    vocab_size = len(tokenizer.vocab)
-    possible_changes = ['mask', 'random', 'same']
-    possible_weights = [0.80, 0.10, 0.10]
-    mask_index = tokenizer.vocab['[MASK]']
-
-    # For each token determine appropriate masking.
-    for i in range(len(input_ids)):
-        if random.random() < 0.15:
-            sample_change = random.choices(possible_changes, weights=possible_weights)
-            if sample_change == 'mask':
-                input_ids[i] = mask_index
-            elif sample_change == 'random':
-                input_ids[i] = random.randrange(vocab_size)
+        if tokens_b:
+            # Modifies `tokens_a` and `tokens_b` in place so that the total
+            # length is less than the specified length.
+            # Account for [CLS], [SEP], [SEP] with "- 3"
+            _truncate_seq_pair(tokens_a, tokens_b, self.max_seq_length - 3)
         else:
-            masked_lm_labels[i] = -1
+            # Account for [CLS] and [SEP] with "- 2"
+            if len(tokens_a) > self.max_seq_length - 2:
+                tokens_a = tokens_a[0:(self.max_seq_length - 2)]
 
-    # Zero-pad up to the sequence length.
-    while len(input_ids) < max_seq_length:
-        input_ids.append(0)
-        input_mask.append(0)
+        # The convention in BERT is:
+        # (a) For sequence pairs:
+        #  tokens:   [CLS] is this jack ##son ##ville ? [SEP] no it is not . [SEP]
+        #  type_ids: 0   0  0    0    0     0       0 0    1  1  1  1   1 1
+        # (b) For single sequences:
+        #  tokens:   [CLS] the dog is hairy . [SEP]
+        #  type_ids: 0   0   0   0  0     0 0
+        #
+        # Where "type_ids" are used to indicate whether this is the first
+        # sequence or the second sequence. The embedding vectors for `type=0` and
+        # `type=1` were learned during pre-training and are added to the wordpiece
+        # embedding vector (and position vector). This is not *strictly* necessary
+        # since the [SEP] token unambigiously separates the sequences, but it makes
+        # it easier for the model to learn the concept of sequences.
+        #
+        # For classification tasks, the first vector (corresponding to [CLS]) is
+        # used as as the "sentence vector". Note that this only makes sense because
+        # the entire model is fine-tuned.
+        tokens = []
+        segment_ids = []
+        tokens.append("[CLS]")
         segment_ids.append(0)
-        masked_lm_labels.append(0)
+        for token in tokens_a:
+            tokens.append(token)
+            segment_ids.append(0)
+        
+        tokens.append("[SEP]")
+        segment_ids.append(0)
 
-    assert len(input_ids) == max_seq_length
-    assert len(input_mask) == max_seq_length
-    assert len(segment_ids) == max_seq_length
-    assert len(masked_lm_labels) == max_seq_length
+        if tokens_b:
+            for token in tokens_b:
+                tokens.append(token)
+                segment_ids.append(1)
+            tokens.append("[SEP]")
+            segment_ids.append(1)
 
-    next_sentence_label = [example.next_sentence_label]
+        input_ids = self.tokenizer.convert_tokens_to_ids(tokens)
+    
+        # The mask has 1 for real tokens and 0 for padding tokens. Only real
+        # tokens are attended to.
+        input_mask = [1] * len(input_ids)
+        masked_lm_labels = list(input_ids)
+        vocab_size = len(self.tokenizer.vocab)
+        possible_changes = ['mask', 'random', 'same']
+        possible_weights = [0.80, 0.10, 0.10]
+        mask_index = self.tokenizer.vocab['[MASK]']
 
-    return InputFeatures(input_ids=input_ids, input_mask=input_mask, segment_ids=segment_ids, 
-                         masked_lm_labels=masked_lm_labels, next_sentence_label=next_sentence_label)
+        # For each token determine appropriate masking.
+        for i in range(len(input_ids)):
+            if random.random() < 0.15:
+                sample_change = random.choices(possible_changes, weights=possible_weights)
+                if sample_change == 'mask':
+                    input_ids[i] = mask_index
+                elif sample_change == 'random':
+                    input_ids[i] = random.randrange(vocab_size)
+            else:
+                masked_lm_labels[i] = -1
 
+        # Zero-pad up to the sequence length.
+        while len(input_ids) < self.max_seq_length:
+            input_ids.append(0)
+            input_mask.append(0)
+            segment_ids.append(0)
+            masked_lm_labels.append(0)
 
-def convert_examples_to_features(examples, max_seq_length, tokenizer):
-    """Loads a data file into a list of `InputBatch`s."""
-    features = []
-    p = multiprocessing.Pool(multiprocessing.cpu_count())
+        assert len(input_ids) == self.max_seq_length
+        assert len(input_mask) == self.max_seq_length
+        assert len(segment_ids) == self.max_seq_length
+        assert len(masked_lm_labels) == self.max_seq_length
 
-    for feature in tqdm(p.imap(construct_features, 
-                               zip(examples, repeat(max_seq_length), repeat(tokenizer)), chunksize=100), 
-                        total=len(examples), desc="Feature Creation"):
-        features.append(feature)
+        next_sentence_label = [example.next_sentence_label]
 
-    return features
-
+        return torch.tensor(input_ids, dtype=torch.long), torch.tensor(input_mask, dtype=torch.long),               torch.tensor(segment_ids, dtype=torch.long), torch.tensor(masked_lm_labels, dtype=torch.long), torch.tensor(next_sentence_label, dtype=torch.long)
 
 def _truncate_seq_pair(tokens_a, tokens_b, max_length):
     """Truncates a sequence pair in place to the maximum length."""
@@ -288,27 +273,6 @@ def set_optimizer_params_grad(named_params_optimizer, named_params_model, test_n
             param_opti.grad = None
     return is_nan
 
-def save_training_dataset(all_input_ids, all_input_mask, all_segment_ids, 
-                          all_masked_lm_labels, all_next_sentence_labels, output_dir):
-    torch.save(all_input_ids, os.path.join(output_dir, "all_input_ids.pth"))
-    torch.save(all_input_mask, os.path.join(output_dir, "all_input_mask.pth"))
-    torch.save(all_segment_ids, os.path.join(output_dir, "all_segment_ids.pth"))
-    torch.save(all_masked_lm_labels, os.path.join(output_dir, "all_masked_lm_labels.pth"))
-    torch.save(all_next_sentence_labels, os.path.join(output_dir, "all_next_sentence_labels.pth"))
-
-def load_training_dataset(output_dir):
-    all_input_ids_path = Path(output_dir, "all_input_ids.pth")    
-
-    if all_input_ids_path.exists():
-        all_input_ids = torch.load(all_input_ids_path)
-        all_input_mask = torch.load(Path(output_dir, "all_input_mask.pth")) 
-        all_segment_ids = torch.load(Path(output_dir, "all_segment_ids.pth"))
-        all_masked_lm_labels = torch.load(Path(output_dir, "all_masked_lm_labels.pth"))
-        all_next_sentence_labels = torch.load(Path(output_dir, "all_next_sentence_labels.pth"))
-        return all_input_ids, all_input_mask, all_segment_ids, all_masked_lm_labels, all_next_sentence_labels
-
-    return (None,) * 5
-
 def main():
     parser = argparse.ArgumentParser()
 
@@ -330,7 +294,7 @@ def main():
                         default=None,
                         type=str,
                         required=True,
-                        help="The output directory is where the features and the model checkpoints will be saved.")
+                        help="The output directory is where the model checkpoints will be saved.")
 
     ## Other parameters
     parser.add_argument("--max_seq_length",
@@ -427,14 +391,8 @@ def main():
     processor = processors[task_name]()
     tokenizer = BertTokenizer.from_pretrained(args.bert_model, do_lower_case=args.do_lower_case)
 
-    all_input_ids, all_input_mask, all_segment_ids, all_masked_lm_labels, all_next_sentence_labels = load_training_dataset(args.output_dir)
-
-    if all_input_ids is None:
-        train_examples = processor.get_train_examples(args.data_dir)
-        num_train_steps = int(len(train_examples) / args.train_batch_size / args.gradient_accumulation_steps * args.num_train_epochs)
-    else:
-        num_train_steps = int(len(all_input_ids) / args.train_batch_size / args.gradient_accumulation_steps * args.num_train_epochs)
-
+    train_examples = processor.get_train_examples(args.data_dir)
+    num_train_steps = int(len(train_examples) / args.train_batch_size / args.gradient_accumulation_steps * args.num_train_epochs)
 
     # Prepare model
     model = BertForPreTraining.from_pretrained(args.bert_model, 
@@ -475,30 +433,18 @@ def main():
                          warmup=args.warmup_proportion,
                          t_total=t_total)
     
-    
-    if all_input_ids is None:
-        train_features = convert_examples_to_features(train_examples, args.max_seq_length, tokenizer)
-        train_features = list(filter(lambda features: features is not None, train_features))
-
-        all_input_ids = torch.tensor([f.input_ids for f in train_features], dtype=torch.long)
-        all_input_mask = torch.tensor([f.input_mask for f in train_features], dtype=torch.long)
-        all_segment_ids = torch.tensor([f.segment_ids for f in train_features], dtype=torch.long)
-        all_masked_lm_labels = torch.tensor([f.masked_lm_labels for f in train_features], dtype=torch.long)
-        all_next_sentence_labels = torch.tensor([f.next_sentence_label for f in train_features], dtype=torch.long)
-        save_training_dataset(all_input_ids, all_input_mask, all_segment_ids, all_masked_lm_labels, all_next_sentence_labels, args.output_dir)
+    train_data = PretrainingDataset(train_examples, args.max_seq_length, tokenizer)
 
     logger.info("***** Running training *****")
-    logger.info("  Num examples = %d", len(all_input_ids))
+    logger.info("  Num examples = %d", len(train_examples))
     logger.info("  Batch size = %d", args.train_batch_size)
     logger.info("  Num steps = %d", num_train_steps)
-
     
-    train_data = TensorDataset(all_input_ids, all_input_mask, all_segment_ids, all_masked_lm_labels, all_next_sentence_labels)
     if args.local_rank == -1:
         train_sampler = RandomSampler(train_data)
     else:
         train_sampler = DistributedSampler(train_data)
-    train_dataloader = DataLoader(train_data, sampler=train_sampler, batch_size=args.train_batch_size)
+    train_dataloader = DataLoader(train_data, sampler=train_sampler, batch_size=args.train_batch_size, num_workers=12, pin_memory=True)
 
     model.train()
     for _ in trange(int(args.num_train_epochs), desc="Epoch"):
@@ -506,7 +452,7 @@ def main():
         nb_tr_examples, nb_tr_steps = 0, 0
         with tqdm(train_dataloader, desc="Iteration") as pbar:
             for step, batch in enumerate(pbar):
-                batch = tuple(t.to(device) for t in batch)
+                # batch = tuple(t.to(device) for t in batch)
                 input_ids, input_mask, segment_ids, masked_lm_labels, next_sentence_labels = batch
                 loss = model(input_ids, segment_ids, input_mask, masked_lm_labels, next_sentence_labels)
                 if n_gpu > 1:
@@ -539,7 +485,7 @@ def main():
                     else:
                         optimizer.step()
                     model.zero_grad()
-                    pbar.set_postfix(loss=".3f" % loss)
+                    pbar.set_postfix(loss="%.3f" % loss)
 
     if n_gpu > 1:
         torch.save(model.module.state_dict(), model_path)
