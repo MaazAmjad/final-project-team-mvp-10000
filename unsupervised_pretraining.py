@@ -226,7 +226,7 @@ class PretrainingDataset(Dataset):
 
         next_sentence_label = [example.next_sentence_label]
 
-        return torch.tensor(input_ids, dtype=torch.long), torch.tensor(input_mask, dtype=torch.long),               torch.tensor(segment_ids, dtype=torch.long), torch.tensor(masked_lm_labels, dtype=torch.long), torch.tensor(next_sentence_label, dtype=torch.long)
+        return torch.tensor(input_ids, dtype=torch.long), torch.tensor(input_mask, dtype=torch.long), torch.tensor(segment_ids, dtype=torch.long), torch.tensor(masked_lm_labels, dtype=torch.long), torch.tensor(next_sentence_label, dtype=torch.long)
 
 def _truncate_seq_pair(tokens_a, tokens_b, max_length):
     """Truncates a sequence pair in place to the maximum length."""
@@ -444,7 +444,7 @@ def main():
         train_sampler = RandomSampler(train_data)
     else:
         train_sampler = DistributedSampler(train_data)
-    train_dataloader = DataLoader(train_data, sampler=train_sampler, batch_size=args.train_batch_size, num_workers=12, pin_memory=True)
+    train_dataloader = DataLoader(train_data, sampler=train_sampler, batch_size=args.train_batch_size, num_workers=0, pin_memory=True)
 
     model.train()
     for _ in trange(int(args.num_train_epochs), desc="Epoch"):
@@ -452,7 +452,6 @@ def main():
         nb_tr_examples, nb_tr_steps = 0, 0
         with tqdm(train_dataloader, desc="Iteration") as pbar:
             for step, batch in enumerate(pbar):
-                # batch = tuple(t.to(device) for t in batch)
                 input_ids, input_mask, segment_ids, masked_lm_labels, next_sentence_labels = batch
                 loss = model(input_ids, segment_ids, input_mask, masked_lm_labels, next_sentence_labels)
                 if n_gpu > 1:
@@ -485,7 +484,7 @@ def main():
                     else:
                         optimizer.step()
                     model.zero_grad()
-                    pbar.set_postfix(loss="%.3f" % loss)
+                    pbar.set_postfix(loss="%.3f" % loss.item())
 
     if n_gpu > 1:
         torch.save(model.module.state_dict(), model_path)
