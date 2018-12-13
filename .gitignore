@@ -1,3 +1,4 @@
 semeval/*
 models*/*
+trained_model/*
 *.pth

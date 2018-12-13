@@ -585,7 +585,7 @@ def main():
                 cache_dir=PYTORCH_PRETRAINED_BERT_CACHE / 'distributed_{}'.format(args.local_rank))
     
     if args.model_path is not None:
-        model.load_state_dict(torch.load(args.model_path))
+        model.load_state_dict(torch.load(args.model_path), strict=False)
 
     if args.fp16:
         model.half()
