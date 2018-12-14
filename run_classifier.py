@@ -25,9 +25,13 @@ import argparse
 import random
 import math
 import multiprocessing
-from itertools import count, repeat
+from itertools import count, repeat, islice
+from lxml import etree
 from tqdm import tqdm, trange
+from html import unescape
 
+import preprocess
+import predict
 import numpy as np
 import torch
 from torch.utils.data import TensorDataset, DataLoader, RandomSampler, SequentialSampler
@@ -68,11 +72,12 @@ class InputExample(object):
 class InputFeatures(object):
     """A single set of features of data."""
 
-    def __init__(self, input_ids, input_mask, segment_ids, label_id):
+    def __init__(self, input_ids, input_mask, segment_ids, label_id, article_id=None):
         self.input_ids = input_ids
         self.input_mask = input_mask
         self.segment_ids = segment_ids
         self.label_id = label_id
+        self.article_id = article_id
 
 
 class DataProcessor(object):
@@ -195,6 +200,54 @@ class ColaProcessor(DataProcessor):
                 InputExample(guid=guid, text_a=text_a, text_b=None, label=label))
         return examples
 
+class SemevalOfficialProcessor(DataProcessor):
+    def __init__(self):
+        super().__init__()
+        self.examples = None
+
+    """Processor for providing model with examples for inference during official competition"""
+    def get_train_examples(self, data_dir):
+        raise NotImplementedError()
+
+    def get_dev_examples(self, data_dir):
+        for f in os.listdir(data_dir):
+            if f.endswith(".xml"):
+                return self._create_examples(open(data_dir + "/" + f, "rb"), data_dir, "inference")
+
+    def get_labels(self):
+        return ["false", "true"]
+
+    def _create_examples(self, data_file, data_dir, set_type):
+        examples = []
+
+        temp_dir = data_dir.rstrip("/") + "_preprocessed"
+        if not(os.path.exists(temp_dir)): 
+            os.mkdir(temp_dir)
+        temp_fname = os.path.join(temp_dir, "articles.xml")
+        temp_fp = open(temp_fname, "wb")
+        temp_fp = predict.do_preprocess([data_file], temp_fp)
+
+        for index, article in enumerate(self._do_xml_parse(temp_fp, 'article')):
+            article_id = article.get('id')
+            article_guid = "%s-%s" % (set_type, article_id)
+            article_text = " ".join(self._extract_text(article).split())
+            examples.append(InputExample(guid=article_guid, text_a=article_text, text_b=None, label=None))
+        return examples
+
+    def _do_xml_parse(self, fp, tag, max_elements=None, progress_message=None):
+        print(type)
+        fp.seek(0)
+        elements = enumerate(islice(etree.iterparse(fp, tag=tag), max_elements))
+        for i, (event, elem) in elements:
+            yield elem   # Returns the current element.
+            elem.clear() # Empties out the list contained in elem to save memory.
+            if progress_message and (i % 1000 == 0):
+                print(progress_message.format(i), file=sys.stderr, end='\r')
+        if progress_message: print(file=sys.stderr)
+
+    def _extract_text(self, article):
+        return unescape("".join([x for x in article.find("spacy").itertext()]).lower())
+
 class SemevalProcessor(DataProcessor):
     def __init__(self):
         super().__init__()
@@ -280,7 +333,7 @@ def create_example_semeval2(inputs):
     return InputExample(guid=guid, text_a=text_a, text_b=None, label=label)
 
 def construct_features(inputs):
-    ex_index, example, max_seq_length, tokenizer, label_map = inputs
+    ex_index, example, max_seq_length, tokenizer, label_map, predict = inputs
     
     tokens_a = tokenizer.tokenize(example.text_a)
     tokens_b = None
@@ -348,7 +401,11 @@ def construct_features(inputs):
     assert len(input_mask) == max_seq_length
     assert len(segment_ids) == max_seq_length
 
-    label_id = label_map[example.label]
+    if not predict:
+        label_id = label_map[example.label]
+    else: 
+        label_id = None
+
     if ex_index < 5:
         logger.info("*** Example ***")
         logger.info("guid: %s" % (example.guid))
@@ -356,12 +413,18 @@ def construct_features(inputs):
         logger.info("input_ids: %s" % " ".join([str(x) for x in input_ids]))
         logger.info("input_mask: %s" % " ".join([str(x) for x in input_mask]))
         logger.info("segment_ids: %s" % " ".join([str(x) for x in segment_ids]))
-        logger.info("label: %s (id = %d)" % (example.label, label_id))
+        if not predict: 
+            logger.info("label: %s (id = %d)" % (example.label, label_id))
+        else:
+            logger.info("id: %s" % label_id)
 
-    return InputFeatures(input_ids=input_ids, input_mask=input_mask, segment_ids=segment_ids, label_id=label_id)
+    if not predict:
+        return InputFeatures(input_ids=input_ids, input_mask=input_mask, segment_ids=segment_ids, label_id=label_id)
+    else:
+        return InputFeatures(input_ids=input_ids, input_mask=input_mask, segment_ids=segment_ids, label_id=label_id, article_id=(example.guid.split('-')[1]))
 
 
-def convert_examples_to_features(examples, label_list, max_seq_length, tokenizer):
+def convert_examples_to_features(examples, label_list, max_seq_length, tokenizer, predict=False):
     """Loads a data file into a list of `InputBatch`s."""
     label_map = {}
     for (i, label) in enumerate(label_list):
@@ -371,7 +434,7 @@ def convert_examples_to_features(examples, label_list, max_seq_length, tokenizer
     p = multiprocessing.Pool(multiprocessing.cpu_count())
 
     for feature in tqdm(p.imap(construct_features, 
-                               zip(count(), examples, repeat(max_seq_length), repeat(tokenizer), repeat(label_map)), chunksize=100), 
+                               zip(count(), examples, repeat(max_seq_length), repeat(tokenizer), repeat(label_map), repeat(predict)), chunksize=100), 
                         desc="Example Creation"):
         features.append(feature)
 
@@ -520,6 +583,10 @@ def main():
     parser.add_argument('--model_path',
                         default=None,
                         help='Model path if you want to use a previously saved model.')
+    parser.add_argument('--predict',
+                        default=False,
+                        action='store_true',
+                        help='Flag determines if we are running this on TIRA.')
     
     args = parser.parse_args()
 
@@ -529,6 +596,7 @@ def main():
         "mrpc": MrpcProcessor,
         "semeval": SemevalProcessor,
         "semeval2": SemevalProcessor2,
+        "semevalofficial": SemevalOfficialProcessor,
     }
 
     if args.local_rank == -1 or args.no_cuda:
@@ -686,15 +754,22 @@ def main():
     if args.do_eval and (args.local_rank == -1 or torch.distributed.get_rank() == 0):
         eval_examples = processor.get_dev_examples(args.data_dir)
         eval_features = convert_examples_to_features(
-            eval_examples, label_list, args.max_seq_length, tokenizer)
+            eval_examples, label_list, args.max_seq_length, tokenizer, args.predict)
+        
         logger.info("***** Running evaluation *****")
         logger.info("  Num examples = %d", len(eval_examples))
         logger.info("  Batch size = %d", args.eval_batch_size)
         all_input_ids = torch.tensor([f.input_ids for f in eval_features], dtype=torch.long)
         all_input_mask = torch.tensor([f.input_mask for f in eval_features], dtype=torch.long)
         all_segment_ids = torch.tensor([f.segment_ids for f in eval_features], dtype=torch.long)
-        all_label_ids = torch.tensor([f.label_id for f in eval_features], dtype=torch.long)
-        eval_data = TensorDataset(all_input_ids, all_input_mask, all_segment_ids, all_label_ids)
+
+        if not args.predict:    
+            all_label_ids = torch.tensor([f.label_id for f in eval_features], dtype=torch.long)
+            eval_data = TensorDataset(all_input_ids, all_input_mask, all_segment_ids, all_label_ids)
+        else:
+            all_article_ids = torch.tensor([int(f.article_id) for f in eval_features], dtype=torch.long)
+            eval_data = TensorDataset(all_input_ids, all_input_mask, all_segment_ids, all_article_ids)
+
         # Run prediction for full data
         eval_sampler = SequentialSampler(eval_data)
         eval_dataloader = DataLoader(eval_data, sampler=eval_sampler, batch_size=args.eval_batch_size)
@@ -702,6 +777,29 @@ def main():
         model.eval()
         eval_loss, eval_accuracy = 0, 0
         nb_eval_steps, nb_eval_examples = 0, 0
+
+        if args.predict:
+            outfile_path = os.path.join(args.output_dir, "predictions.txt")
+            with open(outfile_path, "w") as fp:
+                for input_ids, input_mask, segment_ids, article_ids in tqdm(eval_dataloader, desc="Evaluation"):
+                    input_ids = input_ids.to(device)
+                    input_mask = input_mask.to(device)
+                    segment_ids = segment_ids.to(device)
+                    article_ids = article_ids.to(device)
+
+                    with torch.no_grad():
+                        logits = model(input_ids, segment_ids, input_mask)
+
+                    logits = logits.detach().cpu().numpy()
+                    y_pred = np.argmax(logits, axis=1)
+
+                    outfile = os.path.join(args.output_dir, "predictions.txt")
+                    for article_id, pred in zip(article_ids, y_pred):
+                        print(article_id.item(), end=" ", file=fp)
+                        print(["false", "true"][pred], file=fp)
+
+                return
+
         for input_ids, input_mask, segment_ids, label_ids in tqdm(eval_dataloader, desc="Evaluation"):
             input_ids = input_ids.to(device)
             input_mask = input_mask.to(device)

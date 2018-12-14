@@ -2,3 +2,5 @@ semeval/*
 models*/*
 trained_model/*
 *.pth
+._*
+__pycache__/*
