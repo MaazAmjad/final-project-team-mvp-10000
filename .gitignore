@@ -1,6 +1,7 @@
 semeval/*
 models*/*
 trained_model/*
+trained_large_model/*
 *.pth
 ._*
 __pycache__/*
