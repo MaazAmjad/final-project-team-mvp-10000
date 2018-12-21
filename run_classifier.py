@@ -219,8 +219,9 @@ class SemevalOfficialProcessor(DataProcessor):
 
     def _create_examples(self, data_file, data_dir, set_type):
         examples = []
-
-        temp_dir = data_dir.rstrip("/") + "_preprocessed"
+        
+        current_dir = os.getcwd()
+        temp_dir = current_dir.rstrip("/") + "_preprocessed"
         if not(os.path.exists(temp_dir)): 
             os.mkdir(temp_dir)
         temp_fname = os.path.join(temp_dir, "articles.xml")
@@ -653,7 +654,7 @@ def main():
                 cache_dir=PYTORCH_PRETRAINED_BERT_CACHE / 'distributed_{}'.format(args.local_rank))
     
     if args.model_path is not None:
-        model.load_state_dict(torch.load(args.model_path), strict=False)
+        model.load_state_dict(torch.load(args.model_path, map_location='cpu'), strict=False)
 
     if args.fp16:
         model.half()
@@ -795,7 +796,8 @@ def main():
 
                     outfile = os.path.join(args.output_dir, "predictions.txt")
                     for article_id, pred in zip(article_ids, y_pred):
-                        print(article_id.item(), end=" ", file=fp)
+                        article_id_int = article_id.item()
+                        print(f'{article_id_int:07}', end=" ", file=fp)
                         print(["false", "true"][pred], file=fp)
 
                 return
