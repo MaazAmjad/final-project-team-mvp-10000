@@ -406,7 +406,7 @@ def construct_features(inputs):
     else: 
         label_id = None
 
-    if ex_index < 5:
+    if ex_index < 1:
         logger.info("*** Example ***")
         logger.info("guid: %s" % (example.guid))
         logger.info("tokens: %s" % " ".join([str(x) for x in tokens]))
@@ -457,10 +457,6 @@ def _truncate_seq_pair(tokens_a, tokens_b, max_length):
         else:
             tokens_b.pop()
 
-def accuracy(out, labels):
-    outputs = np.argmax(out, axis=1)
-    return np.sum(outputs == labels)
-
 def copy_optimizer_params_to_model(named_params_model, named_params_optimizer):
     """ Utility function for optimize_on_cpu and 16-bits training.
         Copy the parameters optimized on CPU/RAM back to the model on GPU
@@ -489,6 +485,25 @@ def set_optimizer_params_grad(named_params_optimizer, named_params_model, test_n
         else:
             param_opti.grad = None
     return is_nan
+
+def compute_validation_accuracy(model, eval_dataloader, device):
+    model.eval()
+    eval_accuracy = 0.0
+    nb_eval_examples = 0
+
+    for input_ids, input_mask, segment_ids, label_ids in tqdm(eval_dataloader, desc="Evaluation"):
+        input_ids = input_ids.to(device)
+        input_mask = input_mask.to(device)
+        segment_ids = segment_ids.to(device)
+        label_ids = label_ids.to(device)
+
+        with torch.no_grad():
+            logits = model(input_ids, segment_ids, input_mask)
+
+        eval_accuracy += torch.sum(torch.argmax(logits, dim=1) == label_ids).item()
+        nb_eval_examples += input_ids.size(0)
+
+    return eval_accuracy / nb_eval_examples
 
 def main():
     parser = argparse.ArgumentParser()
@@ -627,6 +642,9 @@ def main():
     if not args.do_train and not args.do_eval:
         raise ValueError("At least one of `do_train` or `do_eval` must be True.")
 
+    if args.do_train and args.do_eval:
+        raise ValueError("`do_train` and `do_eval` together does not make much sense as training logs validation accuracy anyway.")
+
     if os.path.exists(args.output_dir) and os.listdir(args.output_dir):
         raise ValueError("Output directory ({}) already exists and is not empty.".format(args.output_dir))
     os.makedirs(args.output_dir, exist_ok=True)
@@ -645,12 +663,10 @@ def main():
     num_train_steps = None
     if args.do_train:
         train_examples = processor.get_train_examples(args.data_dir)
-        num_train_steps = int(
-            len(train_examples) / args.train_batch_size / args.gradient_accumulation_steps * args.num_train_epochs)
+        num_train_steps = int(len(train_examples) / args.train_batch_size / args.gradient_accumulation_steps * args.num_train_epochs)
 
     # Prepare model
-    model = BertForSequenceClassification.from_pretrained(args.bert_model, 
-                cache_dir=PYTORCH_PRETRAINED_BERT_CACHE / 'distributed_{}'.format(args.local_rank))
+    model = BertForSequenceClassification.from_pretrained(args.bert_model, cache_dir=PYTORCH_PRETRAINED_BERT_CACHE / 'distributed_{}'.format(args.local_rank))
     
     if args.model_path is not None:
         model.load_state_dict(torch.load(args.model_path), strict=False)
@@ -686,14 +702,29 @@ def main():
                          warmup=args.warmup_proportion,
                          t_total=t_total)
 
-    global_step = 0
+    # In both training and evaluation you will use the validation dataset.
+    eval_examples = processor.get_dev_examples(args.data_dir)
+    eval_features = convert_examples_to_features(eval_examples, label_list, args.max_seq_length, tokenizer, args.predict)
+
+    all_input_ids = torch.tensor([f.input_ids for f in eval_features], dtype=torch.long)
+    all_input_mask = torch.tensor([f.input_mask for f in eval_features], dtype=torch.long)
+    all_segment_ids = torch.tensor([f.segment_ids for f in eval_features], dtype=torch.long)
+
+    if not args.predict:    
+        all_label_ids = torch.tensor([f.label_id for f in eval_features], dtype=torch.long)
+        eval_data = TensorDataset(all_input_ids, all_input_mask, all_segment_ids, all_label_ids)
+    else:
+        all_article_ids = torch.tensor([int(f.article_id) for f in eval_features], dtype=torch.long)
+        eval_data = TensorDataset(all_input_ids, all_input_mask, all_segment_ids, all_article_ids)
+
+    eval_sampler = SequentialSampler(eval_data)
+    eval_dataloader = DataLoader(eval_data, sampler=eval_sampler, batch_size=args.eval_batch_size)
+
     if args.do_train:
-        train_features = convert_examples_to_features(
-            train_examples, label_list, args.max_seq_length, tokenizer)
+        train_features = convert_examples_to_features(train_examples, label_list, args.max_seq_length, tokenizer)
         logger.info("***** Running training *****")
         logger.info("  Num examples = %d", len(train_examples))
         logger.info("  Batch size = %d", args.train_batch_size)
-        logger.info("  Num steps = %d", num_train_steps)
         all_input_ids = torch.tensor([f.input_ids for f in train_features], dtype=torch.long)
         all_input_mask = torch.tensor([f.input_mask for f in train_features], dtype=torch.long)
         all_segment_ids = torch.tensor([f.segment_ids for f in train_features], dtype=torch.long)
@@ -704,15 +735,16 @@ def main():
         else:
             train_sampler = DistributedSampler(train_data)
         train_dataloader = DataLoader(train_data, sampler=train_sampler, batch_size=args.train_batch_size)
+        output_eval_file = open(os.path.join(args.output_dir, "eval_results.txt"), "w")
 
-        model.train()
-        for _ in trange(int(args.num_train_epochs), desc="Epoch"):
-            tr_loss = 0
-            nb_tr_examples, nb_tr_steps = 0, 0
+        for i in trange(int(args.num_train_epochs), desc="Epoch"):
+
+            model.train()
             for step, batch in enumerate(tqdm(train_dataloader, desc="Iteration")):
                 batch = tuple(t.to(device) for t in batch)
                 input_ids, input_mask, segment_ids, label_ids = batch
                 loss = model(input_ids, segment_ids, input_mask, label_ids)
+
                 if n_gpu > 1:
                     loss = loss.mean() # mean() to average on multi-gpu.
                 if args.fp16 and args.loss_scale != 1.0:
@@ -722,9 +754,7 @@ def main():
                 if args.gradient_accumulation_steps > 1:
                     loss = loss / args.gradient_accumulation_steps
                 loss.backward()
-                tr_loss += loss.item()
-                nb_tr_examples += input_ids.size(0)
-                nb_tr_steps += 1
+
                 if (step + 1) % args.gradient_accumulation_steps == 0:
                     if args.fp16 or args.optimize_on_cpu:
                         if args.fp16 and args.loss_scale != 1.0:
@@ -743,7 +773,11 @@ def main():
                     else:
                         optimizer.step()
                     model.zero_grad()
-                    global_step += 1
+
+            val_accuracy = compute_validation_accuracy(model, eval_dataloader, device)
+            print("Epoch %d: Validation Accuracy=%.4f" % (i, val_accuracy))
+            output_eval_file.write("Epoch %d: Validation Accuracy=%.4f\n" % (i, val_accuracy))
+            output_eval_file.flush()
 
         model_path = os.path.join(args.output_dir, "model.pth")
         if n_gpu > 1:
@@ -751,33 +785,10 @@ def main():
         else:
             torch.save(model.state_dict(), model_path)
 
+        output_eval_file.close()
+        model_path.close()
+
     if args.do_eval and (args.local_rank == -1 or torch.distributed.get_rank() == 0):
-        eval_examples = processor.get_dev_examples(args.data_dir)
-        eval_features = convert_examples_to_features(
-            eval_examples, label_list, args.max_seq_length, tokenizer, args.predict)
-        
-        logger.info("***** Running evaluation *****")
-        logger.info("  Num examples = %d", len(eval_examples))
-        logger.info("  Batch size = %d", args.eval_batch_size)
-        all_input_ids = torch.tensor([f.input_ids for f in eval_features], dtype=torch.long)
-        all_input_mask = torch.tensor([f.input_mask for f in eval_features], dtype=torch.long)
-        all_segment_ids = torch.tensor([f.segment_ids for f in eval_features], dtype=torch.long)
-
-        if not args.predict:    
-            all_label_ids = torch.tensor([f.label_id for f in eval_features], dtype=torch.long)
-            eval_data = TensorDataset(all_input_ids, all_input_mask, all_segment_ids, all_label_ids)
-        else:
-            all_article_ids = torch.tensor([int(f.article_id) for f in eval_features], dtype=torch.long)
-            eval_data = TensorDataset(all_input_ids, all_input_mask, all_segment_ids, all_article_ids)
-
-        # Run prediction for full data
-        eval_sampler = SequentialSampler(eval_data)
-        eval_dataloader = DataLoader(eval_data, sampler=eval_sampler, batch_size=args.eval_batch_size)
-
-        model.eval()
-        eval_loss, eval_accuracy = 0, 0
-        nb_eval_steps, nb_eval_examples = 0, 0
-
         if args.predict:
             outfile_path = os.path.join(args.output_dir, "predictions.txt")
             with open(outfile_path, "w") as fp:
@@ -790,53 +801,21 @@ def main():
                     with torch.no_grad():
                         logits = model(input_ids, segment_ids, input_mask)
 
-                    logits = logits.detach().cpu().numpy()
-                    y_pred = np.argmax(logits, axis=1)
+                    y_pred = logits.argmax(dim=1)
 
                     outfile = os.path.join(args.output_dir, "predictions.txt")
                     for article_id, pred in zip(article_ids, y_pred):
                         print(article_id.item(), end=" ", file=fp)
-                        print(["false", "true"][pred], file=fp)
+                        print(["false", "true"][pred.item()], file=fp)
 
-                return
+        else:
+            output_eval_file = os.path.join(args.output_dir, "eval_results.txt")
+            val_accuracy = compute_validation_accuracy(model, eval_dataloader, device)
 
-        for input_ids, input_mask, segment_ids, label_ids in tqdm(eval_dataloader, desc="Evaluation"):
-            input_ids = input_ids.to(device)
-            input_mask = input_mask.to(device)
-            segment_ids = segment_ids.to(device)
-            label_ids = label_ids.to(device)
-
-            with torch.no_grad():
-                tmp_eval_loss = model(input_ids, segment_ids, input_mask, label_ids)
-                logits = model(input_ids, segment_ids, input_mask)
-
-            logits = logits.detach().cpu().numpy()
-            label_ids = label_ids.to('cpu').numpy()
-            tmp_eval_accuracy = accuracy(logits, label_ids)
-
-            eval_loss += tmp_eval_loss.mean().item()
-            eval_accuracy += tmp_eval_accuracy
-
-            nb_eval_examples += input_ids.size(0)
-            nb_eval_steps += 1
-
-        eval_loss = eval_loss / nb_eval_steps
-        eval_accuracy = eval_accuracy / nb_eval_examples
-
-        
-        result = {'eval_loss': eval_loss,
-                  'eval_accuracy': eval_accuracy}
-        
-        if args.do_train:
-            result['global_step'] = global_step
-            result['loss'] = tr_loss/nb_tr_steps
-
-        output_eval_file = os.path.join(args.output_dir, "eval_results.txt")
-        with open(output_eval_file, "w") as writer:
-            logger.info("***** Eval results *****")
-            for key in sorted(result.keys()):
-                logger.info("  %s = %s", key, str(result[key]))
-                writer.write("%s = %s\n" % (key, str(result[key])))
+            with open(output_eval_file, "w") as writer:
+                logger.info("***** Eval results *****")
+                logger.info("Validation Accuracy = %.4f", val_accuracy)
+                writer.write("Validation Accuracy = %.4f\n" % (val_accuracy,))
 
 if __name__ == "__main__":
     main()
