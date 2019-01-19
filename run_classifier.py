@@ -601,8 +601,12 @@ def main():
     parser.add_argument('--predict',
                         default=False,
                         action='store_true',
-                        help='Flag determines if we are running this on TIRA.')
-    
+                        help='Flag determines if we are running this on TIRA.') 
+    parser.add_argument('--model_no_save',
+                        default=False,
+                        action='store_true',
+                        help='Flag ensures no models are saved so that computer storage does not fill. This flag is primarily useful for hyperparameter grid search.')
+
     args = parser.parse_args()
 
     processors = {
@@ -775,18 +779,19 @@ def main():
                     model.zero_grad()
 
             val_accuracy = compute_validation_accuracy(model, eval_dataloader, device)
-            print("Epoch %d: Validation Accuracy=%.4f" % (i, val_accuracy))
+            print("\nEpoch %d: Validation Accuracy=%.4f\n" % (i, val_accuracy))
             output_eval_file.write("Epoch %d: Validation Accuracy=%.4f\n" % (i, val_accuracy))
             output_eval_file.flush()
 
         model_path = os.path.join(args.output_dir, "model.pth")
         if n_gpu > 1:
-            torch.save(model.module.state_dict(), model_path)
+            if not args.model_no_save:
+                torch.save(model.module.state_dict(), model_path)
         else:
-            torch.save(model.state_dict(), model_path)
+            if not args.model_no_save:
+                torch.save(model.state_dict(), model_path) 
 
         output_eval_file.close()
-        model_path.close()
 
     if args.do_eval and (args.local_rank == -1 or torch.distributed.get_rank() == 0):
         if args.predict:
