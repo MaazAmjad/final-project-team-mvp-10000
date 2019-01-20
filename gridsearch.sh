@@ -1,2 +1,2 @@
 #!/usr/bin/env bash
-python3 grid_search.py bert-large-uncased gridsearchtest --max_seq_len 10 13 1 --learning_rate 1e-5 2e-5 1e-5 --num_train_epochs 5 6 1
+python3 gridsearch.py bert-large-uncased gridsearch-small-seqlen-vs-learningrate --max_seq_len 50 201 50 --learning_rate 5e-7 3e-6 5e-7 --num_train_epochs 100 101 1

@@ -1,7 +1,17 @@
+# Ignore datasets
 semeval/*
+
+# Ignore trained models
 models*/*
 trained_model/*
 trained_large_model/*
 *.pth
+.
+# Ignore gridsearch results 
+gridsearch-*/
+
+# Others
 ._*
 __pycache__/*
+.ipynb_checkpoints/
+
