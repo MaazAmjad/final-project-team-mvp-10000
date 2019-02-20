@@ -5,13 +5,13 @@ import argparse
 import itertools
 import numpy as np
 
-def create_directory_name(bert_model, max_seq_len, learning_rate, num_train_epochs):
-    return f'{bert_model}_{max_seq_len}_{learning_rate}_{num_train_epochs}'
+def create_directory_name(bert_model, max_seq_len, learning_rate, num_train_epochs, permute_ngrams):
+    return f'{bert_model}_{max_seq_len}_{learning_rate}_{num_train_epochs}_{permute_ngrams}'
 
-def train_model(output_grid_dir_name, bert_model, max_seq_len, learning_rate, num_train_epochs):
-    output_directory = create_directory_name(bert_model, max_seq_len, learning_rate, num_train_epochs)
-    model_arguments = '--output_dir=' + output_grid_dir_name + '/' + output_directory + '/ --max_seq_length=' + str(max_seq_len) + ' --learning_rate=' + str(learning_rate) + ' --num_train_epochs=' + str(num_train_epochs) 
-    shared_arguments = '--data_dir=../semeval/ --bert_model=bert-large-uncased --task_name=semeval --do_train --do_lower_case --train_batch_size=32 --gradient_accumulation_steps=8 --eval_batch_size=4 --model_path=unsupervised_large_model/model.pth --model_no_save'
+def train_model(output_grid_dir_name, bert_model, max_seq_len, learning_rate, num_train_epochs, permute_ngrams):
+    output_directory = create_directory_name(bert_model, max_seq_len, learning_rate, num_train_epochs, permute_ngrams)
+    model_arguments = '--output_dir=' + output_grid_dir_name + '/' + output_directory + '/ --max_seq_length=' + str(max_seq_len) + ' --learning_rate=' + str(learning_rate) + ' --num_train_epochs=' + str(num_train_epochs) + ' --permute_ngrams=' + str(permute_ngrams)
+    shared_arguments = '--data_dir=../semeval/ --bert_model=bert-large-uncased --task_name=semeval --do_train --do_lower_case --train_batch_size=32 --gradient_accumulation_steps=1 --eval_batch_size=32 --model_path=unsupervised_large_model/model.pth --model_no_save'
     
     print('python3 run_classifier.py ' + model_arguments + ' ' + shared_arguments) 
     subprocess.run(['python3', 'run_classifier.py'] + model_arguments.split() + shared_arguments.split())
@@ -22,14 +22,15 @@ def main():
     parser.add_argument('output_grid_dir_name', help='The name of the directory where the grid search should be stored.')
     parser.add_argument('--max_seq_len', nargs=3, type=int, help='Two endpoints and step size for maximum sequence length used by BERT model.')
     parser.add_argument('--learning_rate', nargs=3, type=float, help='Two endpoints and step size for learning rate used when training BERT model.')
-    parser.add_argument('--num_train_epochs', nargs=3, type=int, help='Two endpoints and steop size for number of epochs for which the BERT model should train.')
+    parser.add_argument('--num_train_epochs', nargs=3, type=int, help='Two endpoints and step size for number of epochs for which the BERT model should train.')
+    parser.add_argument('--permute_ngrams', type=eval, help='List of permute_ngram values to consider')
     parser.add_argument('--checkpoint', type=int, help='The model number from which to continue training from. Models begin indexing from 0 because they represent an iteration of the for loop. This flag is useful for continuing training models if a grid search is interrupted')
     opt = parser.parse_args()
     
     # Train all combinations of models
     print('Arguments:', opt)
-    parameters = [np.arange(*opt.max_seq_len), np.arange(*opt.learning_rate), np.arange(*opt.num_train_epochs)] 
-    print('Ranges (max_seq_len, learning_rate, num_train_epochs):', parameters)
+    parameters = [np.arange(*opt.max_seq_len), np.arange(*opt.learning_rate), np.arange(*opt.num_train_epochs), opt.permute_ngrams] 
+    print('Ranges (max_seq_len, learning_rate, num_train_epochs, permute_ngrams):', parameters)
     param_combinations = list(itertools.product(*parameters))
     num_param_combinations = len(list(param_combinations))
     accept = input('You will need to train %d models. Are you sure you\'d like to continue? (y/n) ' % num_param_combinations)
