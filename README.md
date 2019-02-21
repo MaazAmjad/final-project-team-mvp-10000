@@ -1,3 +1,3 @@
-# Final Project Proposal
+# Harvey Mudd College at SemEval-2019 Task 4: The Clint Buchanan Hyperpartisan News Detector
 
-The pdf of our proposal is in this repo.
+We will update this README with background and instructions shortly.
