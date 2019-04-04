@@ -26,6 +26,7 @@ import random
 import math
 import multiprocessing
 from itertools import count, repeat, islice
+from functools import reduce
 from lxml import etree
 from tqdm import tqdm, trange
 from html import unescape
@@ -41,6 +42,7 @@ from pytorch_pretrained_bert.tokenization import BertTokenizer
 from pytorch_pretrained_bert.modeling import BertForSequenceClassification
 from pytorch_pretrained_bert.optimization import BertAdam
 from pytorch_pretrained_bert.file_utils import PYTORCH_PRETRAINED_BERT_CACHE
+from bertaverager import BertForSplicedSequenceClassification
 
 logging.basicConfig(format = '%(asctime)s - %(levelname)s - %(name)s -   %(message)s', 
                     datefmt = '%m/%d/%Y %H:%M:%S',
@@ -256,7 +258,7 @@ class SemevalProcessor(DataProcessor):
     """Processor for the Semeval data set."""
     def get_train_examples(self, data_dir):
         if self.examples is not None:
-            return self.examples[:math.floor(0.8*len(self.examples))]
+            return self.examples[:math.floor(len(self.examples))]
         else:
             self.examples = self._create_examples(data_dir)
             return self.examples[:math.floor(0.8*len(self.examples))]
@@ -332,13 +334,32 @@ def create_example_semeval2(inputs):
     label = label.strip()
     return InputExample(guid=guid, text_a=text_a, text_b=None, label=label)
 
+def permutation(tokens, permute_ngrams):
+    if permute_ngrams is None:
+        return tokens
+
+    ngrams = []
+    i = 0
+    num_tokens = len(tokens)
+
+    while i < num_tokens:
+        ngrams.append(tokens[i:i+permute_ngrams])
+        i += permute_ngrams
+
+    random.shuffle(ngrams)
+    return reduce(lambda a,b: a + b, ngrams, [])
+
+
 def construct_features(inputs):
-    ex_index, example, max_seq_length, tokenizer, label_map, predict = inputs
+    ex_index, example, max_seq_length, tokenizer, label_map, predict, permute_ngrams = inputs
     
     tokens_a = tokenizer.tokenize(example.text_a)
+    tokens_a = permutation(tokens_a, permute_ngrams)
+
     tokens_b = None
     if example.text_b:
         tokens_b = tokenizer.tokenize(example.text_b)
+        tokens_b = permutation(tokens_b, permute_ngrams)
 
     if tokens_b:
         # Modifies `tokens_a` and `tokens_b` in place so that the total
@@ -424,7 +445,7 @@ def construct_features(inputs):
         return InputFeatures(input_ids=input_ids, input_mask=input_mask, segment_ids=segment_ids, label_id=label_id, article_id=(example.guid.split('-')[1]))
 
 
-def convert_examples_to_features(examples, label_list, max_seq_length, tokenizer, predict=False):
+def convert_examples_to_features(examples, label_list, max_seq_length, tokenizer, predict=False, permute_ngrams=None):
     """Loads a data file into a list of `InputBatch`s."""
     label_map = {}
     for (i, label) in enumerate(label_list):
@@ -434,7 +455,8 @@ def convert_examples_to_features(examples, label_list, max_seq_length, tokenizer
     p = multiprocessing.Pool(multiprocessing.cpu_count())
 
     for feature in tqdm(p.imap(construct_features, 
-                               zip(count(), examples, repeat(max_seq_length), repeat(tokenizer), repeat(label_map), repeat(predict)), chunksize=100), 
+                               zip(count(), examples, repeat(max_seq_length), repeat(tokenizer), repeat(label_map), 
+                                   repeat(predict), repeat(permute_ngrams)), chunksize=100), 
                         desc="Example Creation"):
         features.append(feature)
 
@@ -530,11 +552,16 @@ def main():
 
     ## Other parameters
     parser.add_argument("--max_seq_length",
-                        default=128,
+                        default=100,
                         type=int,
                         help="The maximum total input sequence length after WordPiece tokenization. \n"
                              "Sequences longer than this will be truncated, and sequences shorter \n"
                              "than this will be padded.")
+    parser.add_argument("--permute_ngrams",
+                        default=None,
+                        type=int,
+                        help="At what granularity to permute the training articles. By default articles will not be permuted. The value n corresponds "
+                             " to the size of the n-grams to permute.")
     parser.add_argument("--do_train",
                         default=False,
                         action='store_true',
@@ -708,7 +735,8 @@ def main():
 
     # In both training and evaluation you will use the validation dataset.
     eval_examples = processor.get_dev_examples(args.data_dir)
-    eval_features = convert_examples_to_features(eval_examples, label_list, args.max_seq_length, tokenizer, args.predict)
+    eval_features = convert_examples_to_features(eval_examples, label_list, args.max_seq_length, tokenizer, 
+                                                 args.predict, permute_ngrams=args.permute_ngrams)
 
     all_input_ids = torch.tensor([f.input_ids for f in eval_features], dtype=torch.long)
     all_input_mask = torch.tensor([f.input_mask for f in eval_features], dtype=torch.long)
@@ -725,7 +753,7 @@ def main():
     eval_dataloader = DataLoader(eval_data, sampler=eval_sampler, batch_size=args.eval_batch_size)
 
     if args.do_train:
-        train_features = convert_examples_to_features(train_examples, label_list, args.max_seq_length, tokenizer)
+        train_features = convert_examples_to_features(train_examples, label_list, args.max_seq_length, tokenizer, permute_ngrams=args.permute_ngrams)
         logger.info("***** Running training *****")
         logger.info("  Num examples = %d", len(train_examples))
         logger.info("  Batch size = %d", args.train_batch_size)
